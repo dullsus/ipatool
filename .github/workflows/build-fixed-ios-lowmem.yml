@@ -1,0 +1,70 @@
+name: Build fixed ipatool 2.8.0 for jailbroken iOS
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build-fixed-ios.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios:
+    name: Build iOS ARM64 binary with ARM64 Unicorn
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out the official ipatool v2.8.0 source
+        uses: actions/checkout@v4
+        with:
+          repository: majd/ipatool
+          ref: v2.8.0
+          persist-credentials: false
+
+      - name: Install Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.26.5'
+          cache: true
+
+      - name: Install iOS build dependencies
+        run: brew install ldid cmake
+
+      - name: Enable ARM64 emulation in Unicorn (fix UC_ERR_ARCH)
+        run: |
+          grep -Fq -- '-DUNICORN_ARCH=x86' tools/build-ios.sh
+          sed -i '' 's/-DUNICORN_ARCH=x86/-DUNICORN_ARCH=aarch64/' tools/build-ios.sh
+          grep -F -- '-DUNICORN_ARCH=aarch64' tools/build-ios.sh
+
+      - name: Reduce Unicorn translator cache to 32 MiB for older iPhones
+        run: |
+          python3 - <<'PYFIX'
+          from pathlib import Path
+          path = Path('tools/build-ios.sh')
+          source = path.read_text()
+          anchor = 'patch -d "$BUILD_DIR/unicorn-2.1.4" -p1 < "$ROOT/tools/patches/unicorn-ios.patch"'
+          command = 'sed -i \'\' \'s/(1 \\* GiB)/(32 * MiB)/\' "$BUILD_DIR/unicorn-2.1.4/qemu/accel/tcg/translate-all.c"'
+          check = 'grep -Fq "DEFAULT_CODE_GEN_BUFFER_SIZE_1 (32 * MiB)" "$BUILD_DIR/unicorn-2.1.4/qemu/accel/tcg/translate-all.c"'
+          if source.count(anchor) != 1:
+              raise SystemExit('ipatool build script has changed; no patch applied')
+          path.write_text(source.replace(anchor, anchor + '\n' + command + '\n' + check, 1))
+          print('Unicorn iOS translator cache capped at 32 MiB')
+          PYFIX
+
+      - name: Build and sign the corrected iOS binary
+        run: VERSION=2.8.0-fixed ./tools/build-ios.sh ipatool
+
+      - name: Inspect build output
+        run: |
+          file ipatool
+          shasum -a 256 ipatool
+          test -s ipatool
+
+      - name: Upload iPhone-installable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipatool-2.8.0-ios-arm64-fixed-lowmem
+          path: ipatool
+          if-no-files-found: error
+          retention-days: 7
